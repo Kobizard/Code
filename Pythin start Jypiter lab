@@ -1,0 +1,3 @@
+(base) PS C:\Users\toxic>
+(base) PS C:\Users\toxic> cd "C:\Users\toxic\Desktop\PBI\PBI DBs\WoW\Python notebooks"
+(base) PS C:\Users\toxic\Desktop\PBI\PBI DBs\WoW\Python notebooks> jupyter lab
