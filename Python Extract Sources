@@ -30,24 +30,23 @@ for f in os.listdir(folder_path):
 if sheet_df is None:
     raise FileNotFoundError("❌ Could not find a file with 'Query_name' and 'M_expression' columns.")
 
-# Build a set of all query names from the file.
+# Step 2: Build a set of all query names from the file
 all_query_names = set(sheet_df["Query_name"].astype(str).str.strip())
 
-# Step 2: Define patterns to detect sources
+# Step 3: Define patterns to detect sources
 patterns = [
     (r'\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),
     (r'SharePoint\.Files\("([^"]+)"', lambda m: f"SharePoint ({m.group(1)})"),
     (r'Excel\.Workbook\(([^,\)]+)', lambda m: f"Excel Workbook ({m.group(1).strip()})"),
     (r'Databricks\.Catalogs\([^)]+\)', lambda m: "Databricks (Source)"),
-    (r'Table\.FromRows|List\.Max|List\.Generate|#"\w+"', lambda m: "In-Memory / Generated Table"),
+    (r'Table\.FromRows|List\.Max|List\.Generate', lambda m: "In-Memory / Generated Table"),
+    (r'#"\w+"', lambda m: "In-Memory / Generated Table"),  # quoted step names (e.g., #"Filtered Rows")
     (r'FROM\s+([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)', lambda m: f"{m.group(1)} (SQL Table)"),
-    # Databricks Table
     (r'Name\s*=\s*"(?P<table>[a-zA-Z0-9_]+)",\s*Kind\s*=\s*"Table"\]\}\[Data\]', lambda m: f"{m.group('table')} (Databricks Table)"),
-    # Databricks Schema
     (r'(\w+)\s*=\s*\w+\{\[Name\s*=\s*"(?P<schema>[a-zA-Z0-9_]+)",\s*Kind\s*=\s*"Schema"\]\}\[Data\]', lambda m: f"{m.group('schema')} (Databricks Schema Ref)")
 ]
 
-# Step 3: Extract direct sources from each query
+# Step 4: Extract direct sources for each query
 query_sources = {}
 
 for _, row in sheet_df.iterrows():
@@ -55,30 +54,38 @@ for _, row in sheet_df.iterrows():
     expression = str(row["M_expression"]).strip()
     found_sources = set()
 
-    # Detect direct full query references
+    # Check if expression is a direct query reference
     if expression.startswith("=") and "(" not in expression:
         internal_ref = expression[1:].strip()
         if internal_ref in all_query_names:
             found_sources.add(internal_ref)
 
-    # Apply all source detection patterns
+    # Apply detection patterns
+    temp_sources = set()
     for pattern, formatter in patterns:
         for match in re.finditer(pattern, expression):
-            found_sources.add(formatter(match))
+            temp_sources.add(formatter(match))
 
-    # Detect in-expression query references
+    # Split into real and in-memory
+    in_memory_sources = {s for s in temp_sources if s == "In-Memory / Generated Table"}
+    real_sources = temp_sources - in_memory_sources
+
+    # Only add 'In-Memory' if no real sources found
+    if real_sources:
+        found_sources.update(real_sources)
+    else:
+        found_sources.update(temp_sources)
+
+    # Detect internal query references inside expressions
     for other_query in all_query_names:
         if other_query == query_name:
             continue
         if re.search(rf'\b#?"?{re.escape(other_query)}"?\b', expression):
             found_sources.add(other_query)
 
-    if not found_sources:
-        found_sources.add("No source detected")
-
     query_sources[query_name] = list(found_sources)
 
-# Step 4: Map schema+table if Databricks found
+# Step 5: Merge schema/table references for Databricks
 def databricks_schema_table_merge(sources):
     schema = None
     tables = []
@@ -92,20 +99,19 @@ def databricks_schema_table_merge(sources):
         else:
             other_sources.append(s)
 
-    # Combine schema + table
     if schema and tables:
         combined = [f"Databricks-{schema}.{t}" for t in tables]
         return other_sources + combined
     else:
         return other_sources + tables
 
-# Step 5: Recursively resolve true sources and depth
+# Step 6: Resolve full source paths recursively
 def resolve_sources(query, visited=None):
     if visited is None:
         visited = set()
     if query in visited:
         return set()
-    
+
     current_sources = query_sources.get(query, [])
     resolved = set()
 
@@ -115,32 +121,27 @@ def resolve_sources(query, visited=None):
         else:
             resolved.add(src)
 
-    return set(databricks_schema_table_merge(resolved))
+    # Remove accidental "No source detected" from early stages
+    resolved = {r for r in resolved if r != "No source detected"}
 
-# Step 6: Calculate depth of each query (longest path to raw data)
-def calculate_depth(query, visited=None):
-    if visited is None:
-        visited = set()
-    if query in visited:
-        return 0
-    visited = visited | {query}
-    depth = 0
-    for src in query_sources.get(query, []):
-        if src in all_query_names:
-            depth = max(depth, 1 + calculate_depth(src, visited))
-    return depth
+    # Merge schema/table references for Databricks
+    resolved = set(databricks_schema_table_merge(resolved))
 
-# Step 7: Final flatten
+    if not resolved:
+        resolved.add("No source detected")
+
+    return resolved
+
+# Step 7: Flatten result
 results = []
 for query in sorted(all_query_names):
     final_sources = resolve_sources(query)
-    depth = calculate_depth(query)
     for src in sorted(final_sources):
-        results.append((query, src, depth))
+        results.append((query, src))
 
-df_result = pd.DataFrame(results, columns=["Query Name", "Table/Folder", "Query Depth"])
+df_result = pd.DataFrame(results, columns=["Query Name", "Table/Folder"])
 
 # Step 8: Display and export
 display(df_result)
-df_result.to_excel("Resolved_Sources_by_Query_with_Depth.xlsx", index=False)
-print("📁 Results saved to 'Resolved_Sources_by_Query_with_Depth.xlsx'")
+df_result.to_excel("Resolved_Sources_by_Query.xlsx", index=False)
+print("📁 Results saved to 'Resolved_Sources_by_Query.xlsx'")
