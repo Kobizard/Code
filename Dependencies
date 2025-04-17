@@ -1,0 +1,116 @@
+import os
+import re
+import pandas as pd
+from collections import defaultdict
+
+# Step 1: Auto-detect Excel or CSV with query names and M expressions
+folder_path = os.getcwd()
+sheet_df = None
+
+for f in os.listdir(folder_path):
+    if f.endswith(".xlsx") and not f.startswith("~$"):
+        df = pd.read_excel(f)
+        if "Query_name" in df.columns and "M_expression" in df.columns:
+            sheet_df = df
+            print(f"✅ Loaded file: {f}")
+            break
+    elif f.endswith(".csv"):
+        df = pd.read_csv(f)
+        if "Query_name" in df.columns and "M_expression" in df.columns:
+            sheet_df = df
+            print(f"✅ Loaded file: {f}")
+            break
+
+if sheet_df is None:
+    raise FileNotFoundError("❌ No file found with 'Query_name' and 'M_expression' columns.")
+
+all_query_names = set(sheet_df["Query_name"].astype(str).str.strip())
+
+# Step 2: Build forward dependency map
+dependencies = defaultdict(set)
+
+for _, row in sheet_df.iterrows():
+    query = str(row["Query_name"]).strip()
+    expression = str(row["M_expression"]).strip()
+
+    # Direct reference like = QueryX
+    if expression.startswith("=") and "(" not in expression:
+        ref = expression[1:].strip()
+        if ref in all_query_names:
+            dependencies[query].add(ref)
+
+    # Search for embedded query references
+    for other_query in all_query_names:
+        if other_query != query and re.search(rf'\b#?"?{re.escape(other_query)}"?\b', expression):
+            dependencies[query].add(other_query)
+
+# Step 3: Reverse dependency map
+used_by = defaultdict(set)
+for query, deps in dependencies.items():
+    for dep in deps:
+        used_by[dep].add(query)
+
+# Step 4: Recursive functions for upstream and downstream
+def get_all_upstream(query, dependency_map, visited=None):
+    if visited is None:
+        visited = set()
+    result = set()
+    for dep in dependency_map.get(query, []):
+        if dep not in visited:
+            visited.add(dep)
+            result.add(dep)
+            result.update(get_all_upstream(dep, dependency_map, visited))
+    return result
+
+def get_all_downstream(query, reverse_map, visited=None):
+    if visited is None:
+        visited = set()
+    result = set()
+    for user in reverse_map.get(query, []):
+        if user not in visited:
+            visited.add(user)
+            result.add(user)
+            result.update(get_all_downstream(user, reverse_map, visited))
+    return result
+
+# Step 5: Build unified lineage with direction tagging
+full_relations = []
+
+for query in sorted(all_query_names):
+    upstream = get_all_upstream(query, dependencies)
+    downstream = get_all_downstream(query, used_by)
+
+    for parent in sorted(upstream):
+        full_relations.append({
+            "Query": query,
+            "RelatedQuery": parent,
+            "RelationType": "Parent"
+        })
+    for daughter in sorted(downstream):
+        full_relations.append({
+            "Query": query,
+            "RelatedQuery": daughter,
+            "RelationType": "Daughter"
+        })
+
+    # If no connections, still include query
+    if not upstream and not downstream:
+        full_relations.append({
+            "Query": query,
+            "RelatedQuery": None,
+            "RelationType": None
+        })
+
+# Step 6: Save to Excel
+df = pd.DataFrame(full_relations).sort_values(by=["Query", "RelationType", "RelatedQuery"])
+
+# Replace None in RelatedQuery with the value of Query
+df["RelatedQuery"] = df.apply(lambda row: row["Query"] if pd.isna(row["RelatedQuery"]) else row["RelatedQuery"], axis=1)
+
+# Replace None in RelationType with "Parent"
+df["RelationType"] = df["RelationType"].fillna("Parent")
+
+df.to_excel("Query_Full_Dependencies_Bidirectional.xlsx", index=False)
+
+print("📁 Saved: Query_Full_Dependencies_Bidirectional.xlsx")
+print(df.head(10))
