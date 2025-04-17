@@ -1,0 +1,30 @@
+let
+    // Join VisualResult.ArtifactSource to ImpactQueries.Query (direct mapping)
+    JoinOnQuery = Table.NestedJoin(
+        VisualResult, {"ArtifactSource"},
+        ImpactQueries, {"Query"},
+        "ImpactData", JoinKind.LeftOuter
+    ),
+    ExpandedQueryJoin = Table.ExpandTableColumn(
+        JoinOnQuery, "ImpactData",
+        {"Query", "RelatedQuery", "RelationType"}
+    ),
+
+    // Join VisualResult.ArtifactSource to ImpactQueries.RelatedQuery (child-to-parent mapping)
+    JoinOnRelatedQuery = Table.NestedJoin(
+        VisualResult, {"ArtifactSource"},
+        ImpactQueries, {"RelatedQuery"},
+        "ImpactData", JoinKind.LeftOuter
+    ),
+    ExpandedRelatedJoin = Table.ExpandTableColumn(
+        JoinOnRelatedQuery, "ImpactData",
+        {"Query", "RelatedQuery", "RelationType"}
+    ),
+
+    // Combine both sets of mappings
+    Combined = Table.Combine({ExpandedQueryJoin, ExpandedRelatedJoin}),
+
+    // Optional: Remove duplicates if needed
+    RemoveDuplicates = Table.Distinct(Combined)
+in
+    RemoveDuplicates
