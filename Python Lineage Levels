@@ -1,0 +1,125 @@
+import os
+import re
+import pandas as pd
+from collections import defaultdict
+
+# Step 1: Auto-detect Excel or CSV with Power Query expressions
+folder_path = os.getcwd()
+sheet_df = None
+
+for f in os.listdir(folder_path):
+    if f.endswith(".xlsx") and not f.startswith("~$"):
+        df = pd.read_excel(f)
+        if "Query_name" in df.columns and "M_expression" in df.columns:
+            sheet_df = df
+            print(f"✅ Loaded file: {f}")
+            break
+    elif f.endswith(".csv"):
+        df = pd.read_csv(f)
+        if "Query_name" in df.columns and "M_expression" in df.columns:
+            sheet_df = df
+            print(f"✅ Loaded file: {f}")
+            break
+
+if sheet_df is None:
+    raise FileNotFoundError("❌ No file found with 'Query_name' and 'M_expression' columns.")
+
+all_query_names = set(sheet_df["Query_name"].astype(str).str.strip())
+
+# Step 2: Define robust source-detection patterns (SQL + Power Query)
+patterns = [
+    # Bracketed table references
+    (r'\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),
+
+    # Source types
+    (r'SharePoint\.Files\("([^"]+)"', lambda m: f"SharePoint ({m.group(1)})"),
+    (r'Excel\.Workbook\(([^,\)]+)', lambda m: f"Excel Workbook ({m.group(1).strip()})"),
+    (r'Databricks\.Catalogs\([^)]+\)', lambda m: "Databricks (Source)"),
+
+    # Generated tables
+    (r'Table\.FromRows|List\.Max|List\.Generate', lambda m: "In-Memory / Generated Table"),
+    (r'#"\w+"', lambda m: "In-Memory / Generated Table"),
+
+    # Enhanced SQL: FROM and JOIN, bracketed or not
+    (r'\b(?:FROM|JOIN|INNER JOIN|LEFT JOIN|RIGHT JOIN|FULL JOIN|CROSS JOIN)\s+((?:\[?\w+\]?\.){1,2}(?:\[?\w+\]?))',
+     lambda m: m.group(1)),
+
+    # Databricks specifics
+    (r'Name\s*=\s*"(?P<table>[a-zA-Z0-9_]+)",\s*Kind\s*=\s*"Table"\]\}\[Data\]', lambda m: f"{m.group('table')} (Databricks Table)"),
+    (r'(\w+)\s*=\s*\w+\{\[Name\s*=\s*"(?P<schema>[a-zA-Z0-9_]+)",\s*Kind\s*=\s*"Schema"\]\}\[Data\]', lambda m: f"{m.group('schema')} (Databricks Schema Ref)")
+]
+
+# Step 3: Extract direct sources for each query
+query_sources = {}
+
+for _, row in sheet_df.iterrows():
+    query = str(row["Query_name"]).strip()
+    expression = str(row["M_expression"]).strip()
+
+    # Decode Power Query markers for newlines and tabs
+    decoded = (
+        expression.replace("#(lf)", "\n")
+                  .replace("#(tab)", "\t")
+                  .replace("#(cr)", "\r")
+    )
+
+    found_sources = set()
+
+    # Simple "= QueryName" reference
+    if expression.startswith("=") and "(" not in expression:
+        ref = expression[1:].strip()
+        if ref in all_query_names:
+            found_sources.add(ref)
+
+    # Pattern-based source extraction
+    temp_sources = set()
+    for pattern, formatter in patterns:
+        for match in re.finditer(pattern, decoded, flags=re.IGNORECASE | re.MULTILINE):
+            temp_sources.add(formatter(match))
+
+    # In-memory logic
+    in_memory = {s for s in temp_sources if s == "In-Memory / Generated Table"}
+    real_sources = temp_sources - in_memory
+    found_sources.update(real_sources if real_sources else temp_sources)
+
+    # Cross-query references
+    for other_query in all_query_names:
+        if other_query != query and re.search(rf'\b#?"?{re.escape(other_query)}"?\b', decoded):
+            found_sources.add(other_query)
+
+    query_sources[query] = list(found_sources)
+
+# Step 4: Build reverse dependency map
+used_by = defaultdict(set)
+for query, sources in query_sources.items():
+    for src in sources:
+        if src in all_query_names:
+            used_by[src].add(query)
+
+# Step 5: Recursively trace reverse lineage
+reverse_paths = []
+
+def trace_reverse(current, path, visited):
+    if current in visited:
+        return
+    visited = visited | {current}
+    dependents = used_by.get(current, [])
+    if not dependents:
+        reverse_paths.append(path + [current])
+    else:
+        for dep in dependents:
+            trace_reverse(dep, path + [current], visited)
+
+for query in sorted(all_query_names):
+    trace_reverse(query, [], set())
+
+# Step 6: Flatten to table format
+max_depth = max(len(p) for p in reverse_paths)
+columns = ["Level " + str(i) for i in range(max_depth)]
+reverse_df = pd.DataFrame(reverse_paths, columns=columns)
+reverse_df.insert(0, "Source Query", reverse_df["Level 0"])
+
+# Step 7: Export to Excel
+reverse_df.to_excel("Query_Reverse_Lineage_Enhanced.xlsx", index=False)
+print("📁 Saved: Query_Reverse_Lineage_Enhanced.xlsx")
+print(reverse_df.head(10))
