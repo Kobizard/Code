@@ -1,0 +1,86 @@
+import os
+import pandas as pd
+
+# === Step 1: Load the Excel file ===
+file_name = "testfileineage.xlsx"
+file_path = os.path.join(os.getcwd(), file_name)
+
+if not os.path.isfile(file_path):
+    raise FileNotFoundError(f"❌ File '{file_name}' not found in the current directory.")
+
+xls = pd.ExcelFile(file_path)
+required_sheets = {"BiDirectionalQueries", "VisualResult", "DataSourceResult"}
+missing = required_sheets - set(xls.sheet_names)
+if missing:
+    raise ValueError(f"❌ Missing required sheets: {missing}")
+else:
+    print(f"✅ Loaded: {file_name}")
+
+# === Step 2: Load sheets ===
+df_bidirectional = pd.read_excel(file_path, sheet_name='BiDirectionalQueries')
+df_visuals = pd.read_excel(file_path, sheet_name='VisualResult')
+df_sources = pd.read_excel(file_path, sheet_name='DataSourceResult')
+
+# === Step 3: Clean and normalize ===
+df_bidirectional['Query'] = df_bidirectional['Query'].astype(str).str.strip()
+df_bidirectional['RelatedQuery'] = df_bidirectional['RelatedQuery'].astype(str).str.strip()
+df_visuals['ArtifactSource'] = df_visuals['ArtifactSource'].astype(str).str.strip()
+df_sources = df_sources.rename(columns={'Query Name': 'Query', 'Table/Folder': 'Source Table'})
+df_sources['Query'] = df_sources['Query'].astype(str).str.strip()
+df_sources['Source Table'] = df_sources['Source Table'].astype(str).str.strip()
+
+# === Step 4: Build parent map ===
+parent_map = df_bidirectional[df_bidirectional['RelationType'] == 'Parent'] \
+    .groupby('Query')['RelatedQuery'].apply(set).to_dict()
+
+# === Step 5: Trace upstream queries recursively for each visual ===
+lineage_output = []
+
+for _, visual_row in df_visuals.iterrows():
+    query = visual_row['ArtifactSource']
+    visited = set()
+    stack = [query]
+
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        lineage_output.append({
+            "Source": None,  # To be filled in merge
+            "Query": current,
+            "Report Name": visual_row['Report Name'],
+            "Page Name": visual_row['Page Name'],
+            "Visual Name": visual_row['Visual Name'],
+            "Visual Type": visual_row['Visual Type'],
+            "ArtifactName": visual_row['ArtifactName'],
+            "ArtifactType": visual_row['ArtifactType']
+        })
+
+        stack.extend(parent_map.get(current, []))
+
+# === Step 6: Merge in parent Source and actual Source Table ===
+df_lineage = pd.DataFrame(lineage_output).drop_duplicates()
+
+# Add parent (Source) query from lineage
+df_lineage = df_lineage.merge(
+    df_bidirectional[df_bidirectional['RelationType'] == 'Parent'],
+    how='left',
+    on='Query'
+).rename(columns={'RelatedQuery': 'Source'})
+
+# Add Source Table (real data source)
+df_lineage = df_lineage.merge(
+    df_sources,
+    on='Query',
+    how='left'
+)
+
+# === Step 7: Save to Excel ===
+output_file = "AllQueries_VisualLineage_WithSources.xlsx"
+df_lineage.to_excel(output_file, index=False)
+print(f"📁 Saved: {output_file}")
+
+# === Optional: Preview first few rows ===
+df_lineage.head(10)
