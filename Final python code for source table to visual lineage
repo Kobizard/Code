@@ -37,9 +37,9 @@ parent_map = df_bidirectional[df_bidirectional['RelationType'] == 'Parent'] \
 lineage_output = []
 
 for _, visual_row in df_visuals.iterrows():
-    query = visual_row['ArtifactSource']
+    visual_query = visual_row['ArtifactSource']
     visited = set()
-    stack = [query]
+    stack = [visual_query]
 
     while stack:
         current = stack.pop()
@@ -48,8 +48,8 @@ for _, visual_row in df_visuals.iterrows():
         visited.add(current)
 
         lineage_output.append({
-            "Source": None,  # To be filled in merge
             "Query": current,
+            "VisualBaseQuery": visual_query,  # This is the key addition
             "Report Name": visual_row['Report Name'],
             "Page Name": visual_row['Page Name'],
             "Visual Name": visual_row['Visual Name'],
@@ -63,14 +63,14 @@ for _, visual_row in df_visuals.iterrows():
 # === Step 6: Merge in parent Source and actual Source Table ===
 df_lineage = pd.DataFrame(lineage_output).drop_duplicates()
 
-# Add parent (Source) query from lineage
+# Bring back original parent (Source) structure
 df_lineage = df_lineage.merge(
     df_bidirectional[df_bidirectional['RelationType'] == 'Parent'],
     how='left',
     on='Query'
 ).rename(columns={'RelatedQuery': 'Source'})
 
-# Add Source Table (real data source)
+# Add Source Table
 df_lineage = df_lineage.merge(
     df_sources,
     on='Query',
@@ -78,7 +78,7 @@ df_lineage = df_lineage.merge(
 )
 
 # === Step 7: Save to Excel ===
-output_file = "AllQueries_VisualLineage_WithSources.xlsx"
+output_file = "AllQueries_VisualLineage_WithSources_AndBaseQuery.xlsx"
 df_lineage.to_excel(output_file, index=False)
 print(f"📁 Saved: {output_file}")
 
