@@ -2,6 +2,7 @@ import os
 import re
 import pandas as pd
 from collections import defaultdict
+import stat
 
 # === Step 1: Locate the Excel file ending with "_Lineage.xlsx" ===
 folder_path = os.getcwd()
@@ -31,20 +32,22 @@ if df_m_expressions is None:
 
 all_query_names = set(df_m_expressions["Query_name"].astype(str).str.strip())
 
+# === Source extraction patterns ===
 patterns = [
-    (r'\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),
+    (r'\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),  # M-style bracketed
     (r'SharePoint\.Files\("([^"]+)"', lambda m: f"SharePoint ({m.group(1)})"),
     (r'Excel\.Workbook\(([^,\)]+)', lambda m: f"Excel Workbook ({m.group(1).strip()})"),
     (r'Databricks\.Catalogs\([^)]+\)', lambda m: "Databricks (Source)"),
     (r'Name\s*=\s*"(?P<table>\w+)",\s*Kind\s*=\s*"Table"\]\}\[Data\]', lambda m: f"{m.group('table')} (Databricks Table)"),
     (r'(\w+)\s*=\s*\w+\{\[Name\s*=\s*"(?P<schema>\w+)",\s*Kind\s*=\s*"Schema"\]\}\[Data\]', lambda m: f"{m.group('schema')} (Databricks Schema Ref)"),
     (r'Table\.FromRows|List\.Max|List\.Generate|#"\w+"', lambda m: "In-Memory / Generated Table"),
-    (r'\b(?:FROM|JOIN|INNER JOIN|LEFT JOIN|RIGHT JOIN|FULL JOIN|CROSS JOIN)\s+((?:\[?\w+\]?\.){1,2}(?:\[?\w+\]?))',
-     lambda m: m.group(1))
+    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.\"{2}([^"]+)\"{2}', lambda m: f"{m.group(1)}.{m.group(2)}"),  # SAP HANA style
+    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_\-]+)', lambda m: f"{m.group(1)}.{m.group(2)}"),  # schema.table
+    (r'\b(?:FROM|JOIN)\s+\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"{m.group(1)}.{m.group(2)}"),  # T-SQL bracketed
 ]
 
+# === Source detection ===
 query_sources = {}
-
 for _, row in df_m_expressions.iterrows():
     query_name = str(row["Query_name"]).strip()
     expression = str(row["M_expression"]).strip()
@@ -200,17 +203,15 @@ df_lineage = df_lineage.merge(
     how='left'
 )
 
-# === Step 5: Export to a new file, preserving Power Query + VisualResult ===
+# === Step 5: Export to a new file ===
 output_file = lineage_file.replace(".xlsx", "_Updated.xlsx")
 
-# Read all sheets and preserve all except those we want to overwrite
 existing_data = {}
 with pd.ExcelFile(lineage_file, engine='openpyxl') as reader:
     for sheet in reader.sheet_names:
         if sheet not in ["DataSourceResult", "BiDirectionalQueries", "All Queries-Visual Lineage"]:
             existing_data[sheet] = pd.read_excel(reader, sheet_name=sheet)
 
-# Write to new file
 with pd.ExcelWriter(output_file, engine='openpyxl', mode='w') as writer:
     for sheet, df in existing_data.items():
         df.to_excel(writer, sheet_name=sheet, index=False)
@@ -218,8 +219,6 @@ with pd.ExcelWriter(output_file, engine='openpyxl', mode='w') as writer:
     df_bidirectional.to_excel(writer, sheet_name="BiDirectionalQueries", index=False)
     df_lineage.to_excel(writer, sheet_name="All Queries-Visual Lineage", index=False)
 
-# Ensure file is not marked read-only
-import stat
 os.chmod(output_file, stat.S_IWRITE | stat.S_IREAD)
 
 print(f"✅ All sheets written safely to: {output_file}")
