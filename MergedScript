@@ -34,19 +34,18 @@ all_query_names = set(df_m_expressions["Query_name"].astype(str).str.strip())
 
 # === Source extraction patterns ===
 patterns = [
-    (r'\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),  # M-style bracketed
+    (r'\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),
     (r'SharePoint\.Files\("([^"]+)"', lambda m: f"SharePoint ({m.group(1)})"),
     (r'Excel\.Workbook\(([^,\)]+)', lambda m: f"Excel Workbook ({m.group(1).strip()})"),
     (r'Databricks\.Catalogs\([^)]+\)', lambda m: "Databricks (Source)"),
     (r'Name\s*=\s*"(?P<table>\w+)",\s*Kind\s*=\s*"Table"\]\}\[Data\]', lambda m: f"{m.group('table')} (Databricks Table)"),
     (r'(\w+)\s*=\s*\w+\{\[Name\s*=\s*"(?P<schema>\w+)",\s*Kind\s*=\s*"Schema"\]\}\[Data\]', lambda m: f"{m.group('schema')} (Databricks Schema Ref)"),
     (r'Table\.FromRows|List\.Max|List\.Generate|#"\w+"', lambda m: "In-Memory / Generated Table"),
-    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.\"{2}([^"]+)\"{2}', lambda m: f"{m.group(1)}.{m.group(2)}"),  # SAP HANA style
-    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_\-]+)', lambda m: f"{m.group(1)}.{m.group(2)}"),  # schema.table
-    (r'\b(?:FROM|JOIN)\s+\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"{m.group(1)}.{m.group(2)}"),  # T-SQL bracketed
+    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.\"{2}([^"]+)\"{2}', lambda m: f"{m.group(1)}.{m.group(2)}"),
+    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_\-]+)', lambda m: f"{m.group(1)}.{m.group(2)}"),
+    (r'\b(?:FROM|JOIN)\s+\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"{m.group(1)}.{m.group(2)}"),
 ]
 
-# === Source detection ===
 query_sources = {}
 for _, row in df_m_expressions.iterrows():
     query_name = str(row["Query_name"]).strip()
@@ -66,6 +65,12 @@ for _, row in df_m_expressions.iterrows():
     for other in all_query_names:
         if other != query_name and re.search(rf'\b#?"?{re.escape(other)}"?\b', expression):
             found_sources.add(other)
+
+    # ✅ Filter out full query strings or invalid matches
+    found_sources = {
+        s for s in found_sources
+        if not s.strip().startswith("Query=") and not s.strip().startswith("[Query=") and len(s) < 150
+    }
 
     query_sources[query_name] = list(found_sources)
 
