@@ -43,7 +43,7 @@ all_query_names = set(df_m_expressions["Query_name"].astype(str).str.strip())
 
 # === Source extraction patterns ===
 patterns = [
-    (r'\[([^\]]+)\]\.\[([^\]]+?)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),
+    (r'\[([^\]]+)\]\.\[([^\]]+?)\]', lambda m: f"{m.group(1)}.{m.group(2)}"),
     (r'SharePoint\\.Files\("([^"]+)",?', lambda m: f"SharePoint ({m.group(1)})"),
     (r'Excel\\.Workbook\(([^,\)]+)', lambda m: f"Excel Workbook ({m.group(1).strip()})"),
     (r'Databricks\\.Catalogs\([^)]+\)', lambda m: "Databricks (Source)"),
@@ -66,19 +66,19 @@ for _, row in df_m_expressions.iterrows():
     if expression.startswith("=") and "(" not in expression:
         ref = expression[1:].strip()
         if ref in all_query_names:
-            found_sources.add(ref)
+            found_sources.add(normalize_source_name(ref))
 
     for pattern, format_fn in patterns:
         for match in re.finditer(pattern, expression, flags=re.IGNORECASE | re.MULTILINE):
-            found_sources.add(format_fn(match))
+            found_sources.add(normalize_source_name(format_fn(match)))
 
     for other in all_query_names:
         if other != query_name and re.search(rf'\b#?"?{re.escape(other)}"?\b', expression):
-            found_sources.add(other)
+            found_sources.add(normalize_source_name(other))
 
     found_sources = {
-        normalize_source_name(s) for s in found_sources
-        if not s.strip().startswith("Query=") and not s.strip().startswith("[Query=") and len(s) < 150
+        s for s in found_sources
+        if not s.startswith("QUERY=") and len(s) < 150
     }
 
     query_sources[query_name] = list(found_sources)
@@ -88,14 +88,14 @@ def merge_databricks_sources(sources):
     tables = []
     others = []
     for s in sources:
-        if s.endswith("(Databricks Schema Ref)"):
+        if s.endswith("(DATABRICKS SCHEMA REF)"):
             schema = s.split(" ")[0]
-        elif s.endswith("(Databricks Table)"):
+        elif s.endswith("(DATABRICKS TABLE)"):
             tables.append(s.split(" ")[0])
         else:
             others.append(s)
     if schema and tables:
-        return others + [f"Databricks-{schema}.{t}" for t in tables]
+        return others + [f"DATABRICKS-{schema}.{t}" for t in tables]
     return others + tables
 
 def resolve_sources(query, visited=None):
@@ -110,17 +110,14 @@ def resolve_sources(query, visited=None):
             resolved.update(resolve_sources(src, visited | {query}))
         else:
             resolved.add(src)
-    resolved = {r for r in resolved if r != "No source detected"}
-    return set(merge_databricks_sources(resolved)) or {"No source detected"}
+    resolved = {r for r in resolved if r != "NO SOURCE DETECTED"}
+    return set(merge_databricks_sources(resolved)) or {"NO SOURCE DETECTED"}
 
 records = []
 for query in sorted(all_query_names):
     for source in sorted(resolve_sources(query)):
-        records.append((query, normalize_source_name(source)))
+        records.append((query, source))
 
-df_sources = pd.DataFrame(records, columns=["Query Name", "Table/Folder"])
+df_sources = pd.DataFrame(records, columns=["Query Name", "Source Table"])
 
-# === Remaining parts: BiDirectional Dependency Graph, Visual Lineage, Excel Export ===
-# (As previously coded.)
-
-print("✅ All sheets written safely with normalized UPPERCASE sources.")
+# === Save outputs (Excel writing part remains the same as your previous scripts) ===
