@@ -4,15 +4,6 @@ import pandas as pd
 from collections import defaultdict
 import stat
 
-# === Normalization Function ===
-def normalize_source_name(name):
-    if not isinstance(name, str):
-        return name
-    name = name.strip()
-    name = name.replace('[', '').replace(']', '')
-    name = re.sub(r'\s+', '', name)
-    return name.upper()
-
 # === Step 1: Locate the Excel file ending with "_Lineage.xlsx" ===
 folder_path = os.getcwd()
 lineage_file = None
@@ -43,16 +34,16 @@ all_query_names = set(df_m_expressions["Query_name"].astype(str).str.strip())
 
 # === Source extraction patterns ===
 patterns = [
-    (r'\[([^\]]+)\]\.\[([^\]]+?)\]', lambda m: f"{m.group(1)}.{m.group(2)}"),
-    (r'SharePoint\\.Files\("([^"]+)",?', lambda m: f"SharePoint ({m.group(1)})"),
-    (r'Excel\\.Workbook\(([^,\)]+)', lambda m: f"Excel Workbook ({m.group(1).strip()})"),
-    (r'Databricks\\.Catalogs\([^)]+\)', lambda m: "Databricks (Source)"),
+    (r'\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"[{m.group(1)}].[{m.group(2)}]"),
+    (r'SharePoint\.Files\("([^"]+)"', lambda m: f"SharePoint ({m.group(1)})"),
+    (r'Excel\.Workbook\(([^,\)]+)', lambda m: f"Excel Workbook ({m.group(1).strip()})"),
+    (r'Databricks\.Catalogs\([^)]+\)', lambda m: "Databricks (Source)"),
     (r'Name\s*=\s*"(?P<table>\w+)",\s*Kind\s*=\s*"Table"\]\}\[Data\]', lambda m: f"{m.group('table')} (Databricks Table)"),
     (r'(\w+)\s*=\s*\w+\{\[Name\s*=\s*"(?P<schema>\w+)",\s*Kind\s*=\s*"Schema"\]\}\[Data\]', lambda m: f"{m.group('schema')} (Databricks Schema Ref)"),
-    (r'Table\\.FromRows|List\\.Max|List\\.Generate|#\"\w+\"', lambda m: "In-Memory / Generated Table"),
-    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\\."{2}([^\"]+)\"{2}', lambda m: f"{m.group(1)}.{m.group(2)}"),
+    (r'Table\.FromRows|List\.Max|List\.Generate|#"\w+"', lambda m: "In-Memory / Generated Table"),
+    (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.\"{2}([^"]+)\"{2}', lambda m: f"{m.group(1)}.{m.group(2)}"),
     (r'\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_\-]+)', lambda m: f"{m.group(1)}.{m.group(2)}"),
-    (r'\b(?:FROM|JOIN)\s+\[([^\]]+)\]\.\[([^\]]+?)\]', lambda m: f"{m.group(1)}.{m.group(2)}"),
+    (r'\b(?:FROM|JOIN)\s+\[([^\]]+)\]\.\[([^\]]+)\]', lambda m: f"{m.group(1)}.{m.group(2)}"),
 ]
 
 query_sources = {}
@@ -60,25 +51,25 @@ for _, row in df_m_expressions.iterrows():
     query_name = str(row["Query_name"]).strip()
     expression = str(row["M_expression"]).strip()
     expression = expression.replace("#(lf)", "\n").replace("#(tab)", "\t").replace("#(cr)", "\r")
-    expression = ' '.join(expression.splitlines())
     found_sources = set()
 
     if expression.startswith("=") and "(" not in expression:
         ref = expression[1:].strip()
         if ref in all_query_names:
-            found_sources.add(normalize_source_name(ref))
+            found_sources.add(ref)
 
     for pattern, format_fn in patterns:
         for match in re.finditer(pattern, expression, flags=re.IGNORECASE | re.MULTILINE):
-            found_sources.add(normalize_source_name(format_fn(match)))
+            found_sources.add(format_fn(match))
 
     for other in all_query_names:
         if other != query_name and re.search(rf'\b#?"?{re.escape(other)}"?\b', expression):
-            found_sources.add(normalize_source_name(other))
+            found_sources.add(other)
 
+    # ✅ Filter out full query strings or invalid matches
     found_sources = {
         s for s in found_sources
-        if not s.startswith("QUERY=") and len(s) < 150
+        if not s.strip().startswith("Query=") and not s.strip().startswith("[Query=") and len(s) < 150
     }
 
     query_sources[query_name] = list(found_sources)
@@ -88,14 +79,14 @@ def merge_databricks_sources(sources):
     tables = []
     others = []
     for s in sources:
-        if s.endswith("(DATABRICKS SCHEMA REF)"):
+        if s.endswith("(Databricks Schema Ref)"):
             schema = s.split(" ")[0]
-        elif s.endswith("(DATABRICKS TABLE)"):
+        elif s.endswith("(Databricks Table)"):
             tables.append(s.split(" ")[0])
         else:
             others.append(s)
     if schema and tables:
-        return others + [f"DATABRICKS-{schema}.{t}" for t in tables]
+        return others + [f"Databricks-{schema}.{t}" for t in tables]
     return others + tables
 
 def resolve_sources(query, visited=None):
@@ -110,14 +101,129 @@ def resolve_sources(query, visited=None):
             resolved.update(resolve_sources(src, visited | {query}))
         else:
             resolved.add(src)
-    resolved = {r for r in resolved if r != "NO SOURCE DETECTED"}
-    return set(merge_databricks_sources(resolved)) or {"NO SOURCE DETECTED"}
+    resolved = {r for r in resolved if r != "No source detected"}
+    return set(merge_databricks_sources(resolved)) or {"No source detected"}
 
 records = []
 for query in sorted(all_query_names):
     for source in sorted(resolve_sources(query)):
         records.append((query, source))
 
-df_sources = pd.DataFrame(records, columns=["Query Name", "Source Table"])
+df_sources = pd.DataFrame(records, columns=["Query Name", "Table/Folder"])
 
-# === Save outputs (Excel writing part remains the same as your previous scripts) ===
+# === Step 3: BiDirectional Dependency Graph ===
+dependencies = defaultdict(set)
+for _, row in df_m_expressions.iterrows():
+    query = str(row["Query_name"]).strip()
+    expression = str(row["M_expression"]).strip()
+    if expression.startswith("=") and "(" not in expression:
+        ref = expression[1:].strip()
+        if ref in all_query_names:
+            dependencies[query].add(ref)
+    for other_query in all_query_names:
+        if other_query != query and re.search(rf'\b#?"?{re.escape(other_query)}"?\b', expression):
+            dependencies[query].add(other_query)
+
+used_by = defaultdict(set)
+for query, deps in dependencies.items():
+    for dep in deps:
+        used_by[dep].add(query)
+
+def get_all_upstream(query, dependency_map, visited=None):
+    if visited is None:
+        visited = set()
+    result = set()
+    for dep in dependency_map.get(query, []):
+        if dep not in visited:
+            visited.add(dep)
+            result.add(dep)
+            result.update(get_all_upstream(dep, dependency_map, visited))
+    return result
+
+def get_all_downstream(query, reverse_map, visited=None):
+    if visited is None:
+        visited = set()
+    result = set()
+    for user in reverse_map.get(query, []):
+        if user not in visited:
+            visited.add(user)
+            result.add(user)
+            result.update(get_all_downstream(user, reverse_map, visited))
+    return result
+
+relations = []
+for query in sorted(all_query_names):
+    for parent in get_all_upstream(query, dependencies):
+        relations.append({"Query": query, "RelatedQuery": parent, "RelationType": "Parent"})
+    for child in get_all_downstream(query, used_by):
+        relations.append({"Query": query, "RelatedQuery": child, "RelationType": "Daughter"})
+    if not dependencies[query] and not used_by[query]:
+        relations.append({"Query": query, "RelatedQuery": query, "RelationType": "Parent"})
+
+df_bidirectional = pd.DataFrame(relations)
+
+# === Step 4: Visual Lineage ===
+df_visuals = pd.read_excel(lineage_file, sheet_name="VisualResult")
+df_sources = df_sources.rename(columns={'Query Name': 'Query', 'Table/Folder': 'Source Table'})
+df_sources["Query"] = df_sources["Query"].astype(str).str.strip()
+df_bidirectional["Query"] = df_bidirectional["Query"].astype(str).str.strip()
+df_bidirectional["RelatedQuery"] = df_bidirectional["RelatedQuery"].astype(str).str.strip()
+
+parent_map = df_bidirectional[df_bidirectional["RelationType"] == "Parent"] \
+    .groupby("Query")["RelatedQuery"].apply(set).to_dict()
+
+lineage_output = []
+for _, visual_row in df_visuals.iterrows():
+    visual_query = visual_row["ArtifactSource"].strip()
+    visited = set()
+    stack = [visual_query]
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        lineage_output.append({
+            "Query": current,
+            "VisualBaseQuery": visual_query,
+            "Report Name": visual_row['Report Name'],
+            "Page Name": visual_row['Page Name'],
+            "Visual Name": visual_row['Visual Name'],
+            "Visual Type": visual_row['Visual Type'],
+            "ArtifactName": visual_row['ArtifactName'],
+            "ArtifactType": visual_row['ArtifactType']
+        })
+        stack.extend(parent_map.get(current, []))
+
+df_lineage = pd.DataFrame(lineage_output).drop_duplicates()
+
+df_lineage = df_lineage.merge(
+    df_bidirectional[df_bidirectional['RelationType'] == 'Parent'],
+    how='left',
+    on='Query'
+).rename(columns={'RelatedQuery': 'Source'})
+
+df_lineage = df_lineage.merge(
+    df_sources,
+    on='Query',
+    how='left'
+)
+
+# === Step 5: Export to a new file ===
+output_file = lineage_file.replace(".xlsx", "_Updated.xlsx")
+
+existing_data = {}
+with pd.ExcelFile(lineage_file, engine='openpyxl') as reader:
+    for sheet in reader.sheet_names:
+        if sheet not in ["DataSourceResult", "BiDirectionalQueries", "All Queries-Visual Lineage"]:
+            existing_data[sheet] = pd.read_excel(reader, sheet_name=sheet)
+
+with pd.ExcelWriter(output_file, engine='openpyxl', mode='w') as writer:
+    for sheet, df in existing_data.items():
+        df.to_excel(writer, sheet_name=sheet, index=False)
+    df_sources.to_excel(writer, sheet_name="DataSourceResult", index=False)
+    df_bidirectional.to_excel(writer, sheet_name="BiDirectionalQueries", index=False)
+    df_lineage.to_excel(writer, sheet_name="All Queries-Visual Lineage", index=False)
+
+os.chmod(output_file, stat.S_IWRITE | stat.S_IREAD)
+
+print(f"✅ All sheets written safely to: {output_file}")
